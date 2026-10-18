@@ -37,4 +37,6 @@ Three files, all at repo root:
   - **Rendering**: `draw()` clears and redraws grid + locked board + ghost + current piece every frame onto `#board`; `drawNext()` renders the next-piece preview onto `#next-canvas`.
   - **Input**: a single `keydown` listener switches on `e.code` (arrows, `KeyX` for rotate, `Space` for hard drop, `KeyP` for pause), guarded by `paused`/`gameOver`.
 
+- **Theming**: colors live in CSS variables (`:root` = dark default, `[data-theme="light"]` overrides) in `style.css`. `applyTheme()` in `game.js` sets `data-theme` on `<html>`, caches canvas colors (`--grid`, `--highlight`, `--ghost-alpha`), picks `COLORS` or `COLORS_LIGHT`, and redraws. The choice persists in `localStorage` (`theme`); an inline script in `<head>` applies it before first paint. New colors should be CSS variables, not hex literals.
+
 Tunable constants live at the top of `game.js`: `COLS`, `ROWS`, `BLOCK`, `COLORS`, `PIECES`, `LINE_SCORES`. If `COLS`, `ROWS`, or `BLOCK` change, update the `<canvas id="board">` `width`/`height` in `index.html` to match (`COLS × BLOCK` by `ROWS × BLOCK`).

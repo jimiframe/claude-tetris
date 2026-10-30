@@ -62,6 +62,9 @@ const POWERUPS = {
   freeze:    { glyph: '❄', name: 'Congelar' },
 };
 const POWERUP_KINDS = Object.keys(POWERUPS);
+// Feedback visual: al fijarse, el power-up espera EFFECT_MS animando las celdas afectadas antes de aplicarse
+const EFFECT_MS = 450;
+const SHAKE_MS = { bomb: 350, lightning: 180 };
 
 const canvas = document.getElementById('board');
 const ctx = canvas.getContext('2d');
@@ -78,11 +81,13 @@ const themeBtn = document.getElementById('theme-toggle');
 const powerupEl = document.getElementById('powerup-status');
 
 // Colores del canvas leídos de las variables CSS del tema activo (cacheados al cambiar de tema)
-let theme = 'dark', palette = COLORS, gridColor, highlightColor, ghostAlpha, powerColor, wildColor;
+let theme = 'dark', palette = COLORS, gridColor, highlightColor, ghostAlpha, powerColor, wildColor, fxColors = {};
 
 let board, current, next, score, lines, level, paused, gameOver, lastTime, dropAccum, dropInterval, animId;
 // Power-ups: pendientes de generar, hitos de líneas ya contabilizados y congelación restante (ms de juego)
 let powerupsOwed, powerupsGranted, freezeLeft;
+// Efectos visuales: power-up en animación (bloquea la partida), partículas y temblor restante (ms)
+let effect, particles, shakeLeft;
 
 function createBoard() {
   return Array.from({ length: ROWS }, () => new Array(COLS).fill(0));
@@ -92,7 +97,9 @@ function randomPiece() {
   if (powerupsOwed > 0) {
     powerupsOwed--;
     const power = POWERUP_KINDS[Math.floor(Math.random() * POWERUP_KINDS.length)];
-    return { type: POWER_TYPE, power, shape: [[POWER_TYPE]], x: Math.floor(COLS / 2), y: 0 };
+    // axis: el Rayo elige fila o columna al generarse, para poder previsualizarlo
+    const axis = Math.random() < 0.5 ? 'row' : 'col';
+    return { type: POWER_TYPE, power, axis, shape: [[POWER_TYPE]], x: Math.floor(COLS / 2), y: 0 };
   }
   const type = Math.random() < NUT_CHANCE
     ? NUT_TYPE
@@ -142,7 +149,48 @@ function merge() {
         board[current.y + r][current.x + c] = current.shape[r][c];
 }
 
-function applyPowerup(kind, x, y) {
+// Celdas [fila, col] que afectará el power-up si aterriza en (x, y)
+function powerTargets(kind, x, y, axis) {
+  const cells = [];
+  switch (kind) {
+    case 'bomb':
+      for (let r = y - 1; r <= y + 1; r++)
+        for (let c = x - 1; c <= x + 1; c++)
+          if (r >= 0 && r < ROWS && c >= 0 && c < COLS) cells.push([r, c]);
+      break;
+    case 'lightning':
+      if (axis === 'row') for (let c = 0; c < COLS; c++) cells.push([y, c]);
+      else for (let r = 0; r < ROWS; r++) cells.push([r, x]);
+      break;
+    case 'dye': {
+      const top = dyeColor();
+      if (top) for (let r = 0; r < ROWS; r++)
+        for (let c = 0; c < COLS; c++) if (board[r][c] == top) cells.push([r, c]);
+      break;
+    }
+    case 'gravity':
+      // Bloques con algún hueco debajo en su columna
+      for (let c = 0; c < COLS; c++) {
+        let gap = false;
+        for (let r = ROWS - 1; r >= 0; r--) {
+          if (!board[r][c]) gap = true;
+          else if (gap) cells.push([r, c]);
+        }
+      }
+      break;
+  }
+  return cells;
+}
+
+// Color más abundante del tablero (el que convierte Tinte en comodines)
+function dyeColor() {
+  const counts = {};
+  for (const row of board)
+    for (const v of row) if (v && v !== WILD_TYPE) counts[v] = (counts[v] || 0) + 1;
+  return Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+}
+
+function applyPowerup(kind, x, y, axis) {
   switch (kind) {
     case 'bomb':
       for (let r = y - 1; r <= y + 1; r++)
@@ -150,15 +198,12 @@ function applyPowerup(kind, x, y) {
           if (r >= 0 && r < ROWS && c >= 0 && c < COLS) board[r][c] = 0;
       break;
     case 'lightning':
-      if (Math.random() < 0.5) board[y].fill(0);
+      if (axis === 'row') board[y].fill(0);
       else for (let r = 0; r < ROWS; r++) board[r][x] = 0;
       break;
     case 'dye': {
       // Convierte en comodines el color más abundante del tablero
-      const counts = {};
-      for (const row of board)
-        for (const v of row) if (v && v !== WILD_TYPE) counts[v] = (counts[v] || 0) + 1;
-      const top = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+      const top = dyeColor();
       if (top)
         for (const row of board)
           for (let c = 0; c < COLS; c++) if (row[c] == top) row[c] = WILD_TYPE;
@@ -223,10 +268,55 @@ function softDrop() {
 }
 
 function lockPiece() {
-  if (current.power) applyPowerup(current.power, current.x, current.y);
-  else merge();
+  if (current.power) {
+    // El efecto se aplica al terminar la animación (ver finishEffect)
+    const { power: kind, x, y, axis } = current;
+    effect = { kind, x, y, axis, t: 0, cells: powerTargets(kind, x, y, axis) };
+    return;
+  }
+  merge();
   clearLines();
   spawn();
+}
+
+function finishEffect() {
+  const { kind, x, y, axis, cells } = effect;
+  effect = null;
+  burst(kind, x, y, cells);
+  shakeLeft = SHAKE_MS[kind] || 0;
+  applyPowerup(kind, x, y, axis);
+  clearLines();
+  spawn();
+}
+
+// Partículas en píxeles; vida en ms
+function burst(kind, x, y, cells) {
+  const colors = kind === 'bomb' ? [fxColors.bomb, fxColors.bomb_alt] : [fxColors[kind]];
+  const spots = kind === 'freeze' ? [[y, x]] : cells;
+  for (const [r, c] of spots) {
+    const n = kind === 'bomb' ? 8 : 4;
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const v = (kind === 'bomb' ? 0.25 : 0.12) * (0.4 + Math.random());
+      particles.push({
+        x: (c + 0.5) * BLOCK, y: (r + 0.5) * BLOCK,
+        vx: Math.cos(a) * v, vy: Math.sin(a) * v - 0.05,
+        ttl: 400 + Math.random() * 400, life: 1, size: 2 + Math.random() * 3,
+        color: colors[i % colors.length],
+      });
+    }
+  }
+}
+
+function updateParticles(dt) {
+  for (const p of particles) {
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vy += 0.0006 * dt;
+    p.life -= dt / p.ttl;
+  }
+  particles = particles.filter(p => p.life > 0);
+  shakeLeft = Math.max(0, shakeLeft - dt);
 }
 
 function spawn() {
@@ -249,6 +339,8 @@ function applyTheme(name) {
   ghostAlpha = parseFloat(css.getPropertyValue('--ghost-alpha'));
   powerColor = css.getPropertyValue('--powerup').trim();
   wildColor = css.getPropertyValue('--wild').trim();
+  for (const k of ['bomb', 'bomb-alt', 'lightning', 'dye', 'gravity', 'freeze'])
+    fxColors[k.replace('-', '_')] = css.getPropertyValue(`--fx-${k}`).trim();
   const isLight = theme === 'light';
   themeBtn.textContent = isLight ? '☾ Oscuro' : '☀ Claro';
   themeBtn.setAttribute('aria-pressed', isLight);
@@ -313,14 +405,63 @@ function drawGrid() {
   }
 }
 
+// Tiñe las celdas que el power-up va a destruir/transformar; más intenso y parpadeante al aplicarse
+function drawTargets(kind, cells, progress) {
+  const now = performance.now();
+  let color = fxColors[kind];
+  let alpha = 0.3 + 0.2 * Math.sin(now / 120);
+  if (progress !== undefined) alpha = 0.5 + 0.5 * progress;
+  if (kind === 'bomb' && Math.floor(now / 80) % 2) color = fxColors.bomb_alt; // llamas
+  if (kind === 'lightning' && progress !== undefined && Math.floor(now / 50) % 2) {
+    color = '#fff'; // destello eléctrico
+  }
+  ctx.fillStyle = color;
+  ctx.globalAlpha = Math.min(1, alpha);
+  for (const [r, c] of cells)
+    ctx.fillRect(c * BLOCK + 1, r * BLOCK + 1, BLOCK - 2, BLOCK - 2);
+  ctx.globalAlpha = 1;
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// Escarcha sobre el tablero y barra de cuenta atrás mientras dura Congelar
+function drawFrost() {
+  ctx.fillStyle = fxColors.freeze;
+  ctx.globalAlpha = 0.12 + 0.04 * Math.sin(performance.now() / 300);
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.globalAlpha = 0.9;
+  ctx.fillRect(0, 0, canvas.width * (freezeLeft / FREEZE_MS), 4);
+  ctx.globalAlpha = 1;
+}
+
 function draw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.save();
+  if (shakeLeft > 0) {
+    const m = 4 * Math.min(1, shakeLeft / 150);
+    ctx.translate((Math.random() - 0.5) * 2 * m, (Math.random() - 0.5) * 2 * m);
+  }
   drawGrid();
 
   // board
   for (let r = 0; r < ROWS; r++)
     for (let c = 0; c < COLS; c++)
       drawBlock(ctx, c, r, board[r][c], BLOCK);
+
+  // vista previa del efecto (en el punto de aterrizaje) o animación al aplicarse
+  if (effect) {
+    drawTargets(effect.kind, effect.cells, effect.t / EFFECT_MS);
+  } else if (current.power && current.power !== 'freeze') {
+    const py = ghostY();
+    drawTargets(current.power, powerTargets(current.power, current.x, py, current.axis));
+  }
 
   // ghost
   const gy = ghostY();
@@ -333,6 +474,10 @@ function draw() {
   for (let r = 0; r < current.shape.length; r++)
     for (let c = 0; c < current.shape[r].length; c++)
       drawBlock(ctx, current.x + c, current.y + r, current.shape[r][c], BLOCK, 1, glyphOf(current));
+
+  drawParticles();
+  if (freezeLeft > 0) drawFrost();
+  ctx.restore();
 }
 
 function drawNext() {
@@ -371,7 +516,12 @@ function togglePause() {
 function loop(ts) {
   const dt = ts - lastTime;
   lastTime = ts;
-  if (freezeLeft > 0) {
+  updateParticles(dt);
+  if (effect) {
+    effect.t += dt;
+    if (effect.t >= EFFECT_MS) finishEffect();
+    dropAccum = 0;
+  } else if (freezeLeft > 0) {
     // Tiempo de juego: en pausa no corre porque el bucle está detenido
     freezeLeft = Math.max(0, freezeLeft - dt);
     dropAccum = 0;
@@ -405,6 +555,9 @@ function init() {
   powerupsOwed = 0;
   powerupsGranted = 0;
   freezeLeft = 0;
+  effect = null;
+  particles = [];
+  shakeLeft = 0;
   next = randomPiece();
   spawn();
   updateHUD();
@@ -415,7 +568,7 @@ function init() {
 
 document.addEventListener('keydown', e => {
   if (e.code === 'KeyP') { togglePause(); return; }
-  if (paused || gameOver) return;
+  if (paused || gameOver || effect) return;
   switch (e.code) {
     case 'ArrowLeft':
       if (!collide(current.shape, current.x - 1, current.y)) current.x--;

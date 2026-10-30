@@ -19,6 +19,12 @@
   --ghost-alpha: 0.2;
   --powerup: #f06292;
   --wild: #eceff1;
+  --fx-bomb: #ff6d00;
+  --fx-bomb-alt: #ffd600;
+  --fx-lightning: #80d8ff;
+  --fx-dye: #ea80fc;
+  --fx-gravity: #b0bec5;
+  --fx-freeze: #4fc3f7;
 }
 
 [data-theme="light"] {
@@ -42,6 +48,12 @@
   --ghost-alpha: 0.35;
   --powerup: #d81b60;
   --wild: #b0bec5;
+  --fx-bomb: #e65100;
+  --fx-bomb-alt: #f9a825;
+  --fx-lightning: #0288d1;
+  --fx-dye: #aa00ff;
+  --fx-gravity: #546e7a;
+  --fx-freeze: #0277bd;
 }
 
 *, *::before, *::after {

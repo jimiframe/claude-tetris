@@ -14,6 +14,12 @@ const COLORS = [
   '#90caf9', // J - pale blue
   '#ffb74d', // L - orange
   '#bcaaa4', // N - tuerca (gris metálico)
+  null,      // 9 y 10 reservados (POWER_TYPE, WILD_TYPE: colores por CSS)
+  null,
+  '#f06292', // + - pentominó cruz (rosa)
+  '#4db6ac', // U - pentominó U (turquesa)
+  '#aed581', // Y - pentominó Y (lima)
+  '#fff176', // 1×1 - regalo tras Tetris
 ];
 
 // Paleta más saturada para fondo claro (la oscura se pierde: amarillo, cian...)
@@ -27,6 +33,12 @@ const COLORS_LIGHT = [
   '#1e88e5', // J
   '#fb8c00', // L
   '#6d4c41', // N
+  null,
+  null,
+  '#d81b60', // +
+  '#00897b', // U
+  '#7cb342', // Y
+  '#c0a000', // 1×1
 ];
 
 const PIECES = [
@@ -39,11 +51,24 @@ const PIECES = [
   [[6,0,0],[6,6,6],[0,0,0]],                  // J
   [[0,0,7],[7,7,7],[0,0,0]],                  // L
   [[8,8,8],[8,0,8],[8,8,8]],                  // N - tuerca
+  null,                                        // 9: POWER_TYPE (reservado)
+  null,                                        // 10: WILD_TYPE (reservado)
+  [[0,11,0],[11,11,11],[0,11,0]],             // + pentominó
+  [[12,0,12],[12,12,12],[0,0,0]],             // U pentominó
+  [[0,13,0,0],[13,13,13,13],[0,0,0,0],[0,0,0,0]], // Y pentominó (cabe en la vista previa de 4×4)
+  [[14]],                                      // 1×1 de regalo
 ];
 
 // Probabilidad de que una pieza nueva sea la tuerca; el resto se reparte a partes iguales
 const NUT_TYPE = 8;
 const NUT_CHANCE = 0.01;
+
+// Pentominós (+, U, Y): aparecen ocasionalmente; son más difíciles de colocar, así que dan puntos extra al fijarse.
+// Un Tetris (4 líneas a la vez) regala una pieza 1×1 normal (se funde con el tablero) que va antes que los power-ups.
+const PENTOMINO_TYPES = [11, 12, 13];
+const PENTOMINO_CHANCE = 0.06;
+const PENTOMINO_BONUS = 20;
+const SINGLE_TYPE = 14;
 
 const LINE_SCORES =[0, 100, 300, 500, 800];
 
@@ -99,6 +124,8 @@ let theme = 'dark', palette = COLORS, gridColor, highlightColor, ghostAlpha, pow
 let board, current, next, score, lines, level, paused, gameOver, lastTime, dropAccum, dropInterval, animId;
 // Power-ups: pendientes de generar, hitos de líneas ya contabilizados y congelación restante (ms de juego)
 let powerupsOwed, powerupsGranted, freezeLeft;
+// Piezas 1×1 de regalo pendientes (una por Tetris)
+let singlesOwed;
 // Efectos visuales: power-up en animación (bloquea la partida), partículas y temblor restante (ms)
 let effect, particles, shakeLeft;
 // Combo: -1 = sin racha; backToBack = la última limpieza fue "difícil"; lastMoveRotation = el último movimiento fue una rotación;
@@ -111,6 +138,10 @@ function createBoard() {
 }
 
 function randomPiece() {
+  if (singlesOwed > 0) {
+    singlesOwed--;
+    return { type: SINGLE_TYPE, shape: [[SINGLE_TYPE]], x: Math.floor(COLS / 2), y: 0 };
+  }
   if (powerupsOwed > 0) {
     powerupsOwed--;
     const power = POWERUP_KINDS[Math.floor(Math.random() * POWERUP_KINDS.length)];
@@ -118,9 +149,11 @@ function randomPiece() {
     const axis = Math.random() < 0.5 ? 'row' : 'col';
     return { type: POWER_TYPE, power, axis, shape: [[POWER_TYPE]], x: Math.floor(COLS / 2), y: 0 };
   }
-  const type = Math.random() < NUT_CHANCE
-    ? NUT_TYPE
-    : Math.floor(Math.random() * (NUT_TYPE - 1)) + 1;
+  const roll = Math.random();
+  const type = roll < NUT_CHANCE ? NUT_TYPE
+    : roll < NUT_CHANCE + PENTOMINO_CHANCE
+      ? PENTOMINO_TYPES[Math.floor(Math.random() * PENTOMINO_TYPES.length)]
+      : Math.floor(Math.random() * (NUT_TYPE - 1)) + 1;
   const shape = PIECES[type].map(row => [...row]);
   return { type, shape, x: Math.floor(COLS / 2) - Math.floor(shape[0].length / 2), y: 0 };
 }
@@ -412,6 +445,7 @@ function lockPiece() {
     return;
   }
   const tspin = isTSpin();
+  if (PENTOMINO_TYPES.includes(current.type)) score += PENTOMINO_BONUS;
   merge();
   clearLines(tspin);
   spawn();
@@ -509,6 +543,7 @@ function updateHUD() {
 function updatePowerupHUD() {
   let text;
   if (freezeLeft > 0) text = `❄ Congelado ${(freezeLeft / 1000).toFixed(1)}s`;
+  else if (next && next.type === SINGLE_TYPE) text = 'Siguiente: 1×1 de regalo';
   else if (next && next.power) text = `Siguiente: ${POWERUPS[next.power].glyph} ${POWERUPS[next.power].name}`;
   else text = `Power-up en ${POWERUP_EVERY - (lines % POWERUP_EVERY)} líneas`;
   if (powerupEl.textContent !== text) powerupEl.textContent = text;
@@ -722,6 +757,7 @@ function init() {
   dropAccum = 0;
   lastTime = performance.now();
   powerupsOwed = 0;
+  singlesOwed = 0;
   powerupsGranted = 0;
   freezeLeft = 0;
   effect = null;

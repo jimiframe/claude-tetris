@@ -26,6 +26,7 @@
   --fx-gravity: #b0bec5;
   --fx-freeze: #4fc3f7;
   --fx-combo: #ffd740;
+  --energy: #69f0ae;
 }
 
 [data-theme="light"] {
@@ -56,6 +57,7 @@
   --fx-gravity: #546e7a;
   --fx-freeze: #0277bd;
   --fx-combo: #ff6d00;
+  --energy: #00a152;
 }
 
 *, *::before, *::after {
@@ -140,6 +142,7 @@ body {
 }
 
 #next-canvas,
+#queue-canvas,
 #hold-canvas {
   display: block;
   border: 1px solid var(--border);
@@ -283,4 +286,72 @@ kbd {
 
 .overlay.win #overlay-title {
   color: var(--accent);
+}
+
+/* ---- Habilidades cargables ---- */
+.panel-section[hidden] {
+  display: none;
+}
+
+.energy-bar {
+  height: 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--board-bg);
+  overflow: hidden;
+}
+
+#energy-fill {
+  height: 100%;
+  width: 0;
+  background: var(--energy);
+  transition: width 0.2s;
+}
+
+.energy-bar.full #energy-fill {
+  animation: energy-pulse 1s ease-in-out infinite;
+}
+
+@keyframes energy-pulse {
+  50% { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .energy-bar.full #energy-fill { animation: none; }
+  #energy-fill { transition: none; }
+}
+
+#ability-title {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 3px;
+  color: var(--energy);
+}
+
+#ability-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#ability-list button {
+  background: var(--board-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  min-width: 220px;
+}
+
+#ability-list button:hover:not(:disabled) {
+  border-color: var(--energy);
+}
+
+#ability-list button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }

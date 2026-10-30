@@ -123,6 +123,8 @@ const canvas = document.getElementById('board');
 const ctx = canvas.getContext('2d');
 const nextCanvas = document.getElementById('next-canvas');
 const nextCtx = nextCanvas.getContext('2d');
+const holdCanvas = document.getElementById('hold-canvas');
+const holdCtx = holdCanvas.getContext('2d');
 const scoreEl = document.getElementById('score');
 const linesEl = document.getElementById('lines');
 const levelEl = document.getElementById('level');
@@ -150,6 +152,8 @@ let singlesOwed;
 let effect, particles, shakeLeft;
 // Combo: -1 = sin racha; backToBack = la última limpieza fue "difícil"; lastMoveRotation = el último movimiento fue una rotación;
 // floaters = textos flotantes sobre el tablero
+// Hold: tipo de pieza reservada (null = vacío) y si ya se usó con la pieza actual
+let held, holdUsed;
 let combo, backToBack, lastMoveRotation, floaters;
 // Desafío: modo activo, tiempo transcurrido, acumulador de basura y tiempo restante de visibilidad (modo invisible)
 let mode = 'classic', challengeElapsed, garbageAccum, revealLeft;
@@ -236,8 +240,31 @@ function randomPiece() {
     : roll < NUT_CHANCE + PENTOMINO_CHANCE
       ? PENTOMINO_TYPES[Math.floor(Math.random() * PENTOMINO_TYPES.length)]
       : Math.floor(Math.random() * (NUT_TYPE - 1)) + 1;
+  return makePiece(type);
+}
+
+// Pieza nueva (sin rotar) en la posición de spawn
+function makePiece(type) {
   const shape = PIECES[type].map(row => [...row]);
   return { type, shape, x: Math.floor(COLS / 2) - Math.floor(shape[0].length / 2), y: 0 };
+}
+
+// Reserva la pieza actual (o la intercambia con la reservada); una vez por pieza.
+// Power-ups y 1×1 de regalo no se pueden reservar.
+function hold() {
+  if (holdUsed || current.power || current.type === SINGLE_TYPE) return;
+  const type = current.type;
+  if (held == null) {
+    held = type;
+    spawn();
+  } else {
+    current = makePiece(held);
+    held = type;
+    lastMoveRotation = false;
+    if (collide(current.shape, current.x, current.y)) endGame();
+  }
+  holdUsed = true;
+  drawHold();
 }
 
 function collide(shape, ox, oy) {
@@ -593,11 +620,13 @@ function spawn() {
   current = next;
   next = randomPiece();
   lastMoveRotation = false;
+  holdUsed = false;
   revealLeft = REVEAL_MS;
   if (collide(current.shape, current.x, current.y)) {
     endGame();
   }
   drawNext();
+  drawHold();
   updatePowerupHUD();
 }
 
@@ -619,7 +648,7 @@ function applyTheme(name) {
   themeBtn.setAttribute('aria-pressed', isLight);
   themeBtn.setAttribute('aria-label', isLight ? 'Cambiar a modo oscuro' : 'Cambiar a modo claro');
   // Repintar para que el cambio se vea también en pausa o game over
-  if (current) { draw(); drawNext(); }
+  if (current) { draw(); drawNext(); drawHold(); }
 }
 
 function updateHUD() {
@@ -778,15 +807,26 @@ function draw() {
   drawFloaters();
 }
 
-function drawNext() {
+function drawPreview(context, cvs, piece) {
   const NB = 30;
-  nextCtx.clearRect(0, 0, nextCanvas.width, nextCanvas.height);
-  const shape = next.shape;
+  context.clearRect(0, 0, cvs.width, cvs.height);
+  if (!piece) return;
+  const shape = piece.shape;
   const offX = Math.floor((4 - shape[0].length) / 2);
   const offY = Math.floor((4 - shape.length) / 2);
   for (let r = 0; r < shape.length; r++)
     for (let c = 0; c < shape[r].length; c++)
-      drawBlock(nextCtx, offX + c, offY + r, shape[r][c], NB, 1, glyphOf(next));
+      drawBlock(context, offX + c, offY + r, shape[r][c], NB, 1, glyphOf(piece));
+}
+
+function drawNext() {
+  drawPreview(nextCtx, nextCanvas, next);
+}
+
+// El slot se atenúa (.locked) mientras el hold está bloqueado en este turno
+function drawHold() {
+  drawPreview(holdCtx, holdCanvas, held == null ? null : makePiece(held));
+  holdCanvas.classList.toggle('locked', !!holdUsed);
 }
 
 function endGame(title = 'GAME OVER') {
@@ -873,6 +913,8 @@ function init() {
   lastTime = performance.now();
   powerupsOwed = 0;
   singlesOwed = 0;
+  held = null;
+  holdUsed = false;
   powerupsGranted = 0;
   freezeLeft = 0;
   effect = null;
@@ -911,6 +953,11 @@ document.addEventListener('keydown', e => {
     case 'Space':
       e.preventDefault();
       hardDrop();
+      break;
+    case 'KeyC':
+    case 'ShiftLeft':
+    case 'ShiftRight':
+      hold();
       break;
   }
   updateHUD();

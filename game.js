@@ -119,12 +119,38 @@ const GARBAGE_TYPE = 8;     // las filas de basura reutilizan el color de la tue
 const PRESET_FILL = 0.7;    // probabilidad de celda ocupada en el tablero pre-colocado
 const REVEAL_MS = 600;      // cuánto se ven los bloques tras fijar una pieza en el modo invisible
 
+// Habilidades cargables: limpiar líneas llena la barra de energía; con la barra llena, `E` abre el menú y se elige UNA habilidad.
+// Todas vacían la barra salvo "Ver siguientes", que la usa como reserva: baja ENERGY_PEEK_DRAIN por pieza hasta agotarse.
+const ENERGY_MAX = 100;
+const ENERGY_GAIN = [0, 10, 25, 40, 60];   // por líneas limpiadas a la vez
+const ENERGY_TSPIN = 15;
+const ENERGY_PERFECT = 50;
+const ENERGY_PEEK_DRAIN = 10;
+const PEEK_COUNT = 5;       // next + 4 piezas más en la vista previa
+const SLOW_MS = 10000;
+const SLOW_FACTOR = 2;      // multiplica el intervalo de caída mientras dura Ralentizar
+const ABILITIES = [
+  { id: 'peek', name: 'Ver siguientes 5 piezas' },
+  { id: 'swap', name: 'Cambiar pieza actual por otra al azar' },
+  { id: 'slow', name: 'Ralentizar tiempo 10 s' },
+  { id: 'undo', name: 'Deshacer última colocación' },
+  { id: 'hold', name: 'Reservar pieza (extra)' },
+];
+
 const canvas = document.getElementById('board');
 const ctx = canvas.getContext('2d');
 const nextCanvas = document.getElementById('next-canvas');
 const nextCtx = nextCanvas.getContext('2d');
 const holdCanvas = document.getElementById('hold-canvas');
 const holdCtx = holdCanvas.getContext('2d');
+const queueCanvas = document.getElementById('queue-canvas');
+const queueCtx = queueCanvas.getContext('2d');
+const queueSection = document.getElementById('queue-section');
+const energyBar = document.getElementById('energy-bar');
+const energyFill = document.getElementById('energy-fill');
+const abilityStatusEl = document.getElementById('ability-status');
+const abilityMenu = document.getElementById('ability-menu');
+const abilityList = document.getElementById('ability-list');
 const scoreEl = document.getElementById('score');
 const linesEl = document.getElementById('lines');
 const levelEl = document.getElementById('level');
@@ -154,6 +180,9 @@ let effect, particles, shakeLeft;
 // floaters = textos flotantes sobre el tablero
 // Hold: tipo de pieza reservada (null = vacío) y si ya se usó con la pieza actual
 let held, holdUsed;
+// Habilidades: energía, vista previa activa (queue = piezas tras `next`), ralentización restante (ms),
+// instantánea previa a la última colocación (para Deshacer) y si el menú está abierto
+let energy, peekActive, queue, slowLeft, snapshot, menuOpen = false;
 let combo, backToBack, lastMoveRotation, floaters;
 // Desafío: modo activo, tiempo transcurrido, acumulador de basura y tiempo restante de visibilidad (modo invisible)
 let mode = 'classic', challengeElapsed, garbageAccum, revealLeft;
@@ -235,6 +264,11 @@ function randomPiece() {
     const axis = Math.random() < 0.5 ? 'row' : 'col';
     return { type: POWER_TYPE, power, axis, shape: [[POWER_TYPE]], x: Math.floor(COLS / 2), y: 0 };
   }
+  return randomNormalPiece();
+}
+
+// Pieza normal al azar (tetromino, tuerca o pentominó); no consume power-ups ni regalos pendientes
+function randomNormalPiece() {
   const roll = Math.random();
   const type = roll < NUT_CHANCE ? NUT_TYPE
     : roll < NUT_CHANCE + PENTOMINO_CHANCE
@@ -251,8 +285,9 @@ function makePiece(type) {
 
 // Reserva la pieza actual (o la intercambia con la reservada); una vez por pieza.
 // Power-ups y 1×1 de regalo no se pueden reservar.
-function hold() {
-  if (holdUsed || current.power || current.type === SINGLE_TYPE) return;
+// `force` (habilidad "Reservar") ignora el límite de una vez por pieza. Devuelve si se reservó.
+function hold(force = false) {
+  if ((holdUsed && !force) || current.power || current.type === SINGLE_TYPE) return false;
   const type = current.type;
   if (held == null) {
     held = type;
@@ -265,6 +300,7 @@ function hold() {
   }
   holdUsed = true;
   drawHold();
+  return true;
 }
 
 function collide(shape, ox, oy) {
@@ -413,6 +449,7 @@ function clearLines(tspin = false) {
     combo = -1; // sin limpieza se pierde la racha (el B2B se conserva)
     if (tspin) {
       score += TSPIN_SCORES[0] * level;
+      if (!peekActive) energy = Math.min(ENERGY_MAX, energy + ENERGY_TSPIN);
       announce(['T-SPIN']);
       sfx('tspin');
     }
@@ -439,6 +476,7 @@ function clearLines(tspin = false) {
   }
 
   lines += cleared;
+  let gained = ENERGY_GAIN[cleared] + (tspin ? ENERGY_TSPIN : 0);
   const prevLevel = level;
   level = levelFor(lines);
   const rev = challenge().reverseLevel;
@@ -452,6 +490,14 @@ function clearLines(tspin = false) {
   if (perfect) {
     score += PERFECT_CLEAR_SCORE * level;
     msgs.push('PERFECT CLEAR!');
+    gained += ENERGY_PERFECT;
+  }
+
+  // Mientras la vista previa gasta la barra no se recarga
+  if (!peekActive) {
+    const wasFull = energy >= ENERGY_MAX;
+    energy = Math.min(ENERGY_MAX, energy + gained);
+    if (!wasFull && energy >= ENERGY_MAX) msgs.push('¡ENERGÍA LISTA! (E)');
   }
 
   if (msgs.length) announce(msgs);
@@ -555,7 +601,23 @@ function softDrop() {
   }
 }
 
+// Estado previo a fijar la pieza actual, para la habilidad Deshacer (la energía no se restaura: ya se gastó)
+function takeSnapshot() {
+  const { type, power, axis } = current;
+  const piece = power
+    ? { type, power, axis, shape: [[POWER_TYPE]], x: Math.floor(COLS / 2), y: 0 }
+    : type === SINGLE_TYPE
+      ? { type, shape: [[SINGLE_TYPE]], x: Math.floor(COLS / 2), y: 0 }
+      : makePiece(type);
+  snapshot = {
+    board: board.map(row => [...row]), piece, next, queue: [...queue],
+    score, lines, level, combo, backToBack, held, holdUsed, freezeLeft,
+    powerupsOwed, powerupsGranted, singlesOwed,
+  };
+}
+
 function lockPiece() {
+  takeSnapshot();
   if (current.power) {
     // El efecto se aplica al terminar la animación (ver finishEffect)
     const { power: kind, x, y, axis } = current;
@@ -618,7 +680,17 @@ function updateParticles(dt) {
 
 function spawn() {
   current = next;
-  next = randomPiece();
+  next = queue.length ? queue.shift() : randomPiece();
+  if (peekActive) {
+    energy -= ENERGY_PEEK_DRAIN;
+    if (energy <= 0) {
+      energy = 0;
+      peekActive = false;
+      // Las piezas ya vistas se conservan; solo dejan de generarse por adelantado
+    } else {
+      fillQueue();
+    }
+  }
   lastMoveRotation = false;
   holdUsed = false;
   revealLeft = REVEAL_MS;
@@ -626,6 +698,112 @@ function spawn() {
     endGame();
   }
   drawNext();
+  drawHold();
+  drawQueue();
+  updatePowerupHUD();
+}
+
+// ---- Habilidades ----
+function fillQueue() {
+  while (queue.length < PEEK_COUNT - 1) queue.push(randomPiece());
+}
+
+// ¿Se puede usar ahora? Con un power-up animándose (`effect`) la pieza actual ya no se puede tocar.
+function abilityAvailable(id) {
+  switch (id) {
+    case 'peek': return !peekActive;
+    case 'swap': return !effect && !current.power && current.type !== SINGLE_TYPE;
+    case 'slow': return true;
+    case 'undo': return !!snapshot;
+    case 'hold': return !effect && !current.power && current.type !== SINGLE_TYPE;
+  }
+  return false;
+}
+
+function canOpenAbilityMenu() {
+  return energy >= ENERGY_MAX && !peekActive && !menuOpen && !paused && !gameOver;
+}
+
+function openAbilityMenu() {
+  abilityList.replaceChildren();
+  ABILITIES.forEach((ab, i) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.tabIndex = -1;
+    btn.textContent = `${i + 1}. ${ab.name}`;
+    btn.disabled = !abilityAvailable(ab.id);
+    btn.addEventListener('click', () => chooseAbility(i));
+    abilityList.appendChild(btn);
+  });
+  menuOpen = true;
+  paused = true;
+  cancelAnimationFrame(animId);
+  abilityMenu.classList.remove('hidden');
+}
+
+function closeAbilityMenu() {
+  if (!menuOpen) return;
+  menuOpen = false;
+  abilityMenu.classList.add('hidden');
+  if (gameOver) return;
+  paused = false;
+  lastTime = performance.now();
+  loop(lastTime);
+}
+
+function chooseAbility(i) {
+  const ab = ABILITIES[i];
+  if (!ab || !abilityAvailable(ab.id)) return;
+  switch (ab.id) {
+    case 'peek':
+      peekActive = true;   // la barra se queda y se va gastando por pieza
+      fillQueue();
+      break;
+    case 'swap': {
+      // Pieza al azar distinta en tipo a la actual; si choca con el tablero se conserva la actual
+      let piece;
+      do piece = randomNormalPiece(); while (piece.type === current.type);
+      if (collide(piece.shape, piece.x, piece.y)) return;
+      current = piece;
+      lastMoveRotation = false;
+      energy = 0;
+      break;
+    }
+    case 'slow':
+      slowLeft = SLOW_MS;
+      energy = 0;
+      break;
+    case 'undo':
+      undoPlacement();
+      energy = 0;
+      break;
+    case 'hold':
+      if (!hold(true)) return;
+      energy = 0;
+      break;
+  }
+  sfx('clear');
+  announce([{ peek: 'VISTA PREVIA', swap: 'CAMBIO', slow: 'TIEMPO LENTO', undo: 'DESHECHO', hold: 'RESERVA' }[ab.id]]);
+  drawNext();
+  drawQueue();
+  updateHUD();
+  closeAbilityMenu();
+}
+
+function undoPlacement() {
+  const s = snapshot;
+  snapshot = null;
+  effect = null;
+  board = s.board;
+  current = s.piece;
+  next = s.next;
+  queue = s.queue;
+  ({ score, lines, level, combo, backToBack, held, holdUsed, freezeLeft,
+     powerupsOwed, powerupsGranted, singlesOwed } = s);
+  dropInterval = dropFor(level);
+  dropAccum = 0;
+  lastMoveRotation = false;
+  revealLeft = REVEAL_MS;
   drawHold();
   updatePowerupHUD();
 }
@@ -648,7 +826,7 @@ function applyTheme(name) {
   themeBtn.setAttribute('aria-pressed', isLight);
   themeBtn.setAttribute('aria-label', isLight ? 'Cambiar a modo oscuro' : 'Cambiar a modo claro');
   // Repintar para que el cambio se vea también en pausa o game over
-  if (current) { draw(); drawNext(); drawHold(); }
+  if (current) { draw(); drawNext(); drawHold(); drawQueue(); }
 }
 
 function updateHUD() {
@@ -661,6 +839,20 @@ function updateHUD() {
   if (backToBack) parts.push('B2B activo');
   const text = parts.join(' · ') || '—';
   if (comboEl.textContent !== text) comboEl.textContent = text;
+  updateAbilityHUD();
+}
+
+function updateAbilityHUD() {
+  const pct = Math.round(energy / ENERGY_MAX * 100);
+  energyFill.style.width = `${pct}%`;
+  energyBar.classList.toggle('full', energy >= ENERGY_MAX && !peekActive);
+  energyBar.setAttribute('aria-valuenow', pct);
+  const parts = [];
+  if (peekActive) parts.push('Vista previa activa');
+  else if (energy >= ENERGY_MAX) parts.push('¡Lista! Pulsa E');
+  if (slowLeft > 0) parts.push(`🐌 Lento ${(slowLeft / 1000).toFixed(1)}s`);
+  const text = parts.join(' · ') || `${pct}%`;
+  if (abilityStatusEl.textContent !== text) abilityStatusEl.textContent = text;
 }
 
 function updatePowerupHUD() {
@@ -807,16 +999,24 @@ function draw() {
   drawFloaters();
 }
 
-function drawPreview(context, cvs, piece) {
-  const NB = 30;
-  context.clearRect(0, 0, cvs.width, cvs.height);
+// Dibuja la pieza centrada en una caja 4×4 cuya esquina está en la celda (cx, cy) de tamaño `size`
+function drawPreview(context, cvs, piece, size = 30, cx = 0, cy = 0, clear = true) {
+  if (clear) context.clearRect(0, 0, cvs.width, cvs.height);
   if (!piece) return;
   const shape = piece.shape;
-  const offX = Math.floor((4 - shape[0].length) / 2);
-  const offY = Math.floor((4 - shape.length) / 2);
+  const offX = cx + Math.floor((4 - shape[0].length) / 2);
+  const offY = cy + Math.floor((4 - shape.length) / 2);
   for (let r = 0; r < shape.length; r++)
     for (let c = 0; c < shape[r].length; c++)
-      drawBlock(context, offX + c, offY + r, shape[r][c], NB, 1, glyphOf(piece));
+      drawBlock(context, offX + c, offY + r, shape[r][c], size, 1, glyphOf(piece));
+}
+
+// Piezas tras `next` (2×2 cajas de 4×4 a media escala); la sección se oculta si no hay ninguna
+function drawQueue() {
+  queueSection.hidden = !queue.length;
+  queueCtx.clearRect(0, 0, queueCanvas.width, queueCanvas.height);
+  queue.slice(0, 4).forEach((p, i) =>
+    drawPreview(queueCtx, queueCanvas, p, 15, (i % 2) * 4, Math.floor(i / 2) * 4, false));
 }
 
 function drawNext() {
@@ -851,7 +1051,7 @@ function winGame(title) {
 }
 
 function togglePause() {
-  if (gameOver) return;
+  if (gameOver || menuOpen) return;
   paused = !paused;
   if (!paused) {
     lastTime = performance.now();
@@ -869,6 +1069,10 @@ function loop(ts) {
   const dt = ts - lastTime;
   lastTime = ts;
   updateParticles(dt);
+  if (slowLeft > 0 && !effect) {
+    slowLeft = Math.max(0, slowLeft - dt);
+    updateAbilityHUD();
+  }
   if (effect) {
     effect.t += dt;
     if (effect.t >= EFFECT_MS) finishEffect();
@@ -883,7 +1087,7 @@ function loop(ts) {
     tickChallenge(dt);
   }
   if (gameOver) { draw(); return; }
-  if (dropAccum >= dropInterval) {
+  if (dropAccum >= dropInterval * (slowLeft > 0 ? SLOW_FACTOR : 1)) {
     dropAccum = 0;
     if (!collide(current.shape, current.x, current.y + 1)) {
       current.y++;
@@ -924,6 +1128,13 @@ function init() {
   backToBack = false;
   lastMoveRotation = false;
   floaters = [];
+  energy = 0;
+  peekActive = false;
+  queue = [];
+  slowLeft = 0;
+  snapshot = null;
+  menuOpen = false;
+  abilityMenu.classList.add('hidden');
   next = randomPiece();
   spawn();
   updateHUD();
@@ -934,7 +1145,15 @@ function init() {
 
 document.addEventListener('keydown', e => {
   ensureAudio(); // los navegadores exigen un gesto del usuario para iniciar el audio
+  if (menuOpen) {
+    // Con el menú abierto solo se elige habilidad (1-5) o se cancela
+    const m = /^(?:Digit|Numpad)([1-9])$/.exec(e.code);
+    if (m) chooseAbility(Number(m[1]) - 1);
+    else if (e.code === 'KeyE' || e.code === 'Escape') closeAbilityMenu();
+    return;
+  }
   if (e.code === 'KeyP') { togglePause(); return; }
+  if (e.code === 'KeyE' && canOpenAbilityMenu()) { openAbilityMenu(); return; }
   if (paused || gameOver || effect) return;
   switch (e.code) {
     case 'ArrowLeft':

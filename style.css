@@ -264,3 +264,23 @@ kbd {
 #sound-toggle:hover {
   border-color: var(--accent);
 }
+
+/* ---- Modo desafío ---- */
+#mode-select {
+  background: var(--board-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+#mode-select:hover {
+  border-color: var(--accent);
+}
+
+.overlay.win #overlay-title {
+  color: var(--accent);
+}

@@ -102,6 +102,23 @@ const POWERUP_KINDS = Object.keys(POWERUPS);
 const EFFECT_MS = 450;
 const SHAKE_MS = { bomb: 350, lightning: 180 };
 
+// Modo desafío: cada reto añade un objetivo (líneas y/o tiempo) y una regla especial.
+// timeLimit (ms): cuenta atrás; si `survive`, llegar a 0 es victoria, si no es derrota.
+// garbageEvery (ms): sube una fila de basura con un hueco. presetRows: filas iniciales pre-colocadas.
+// invisible: los bloques fijados se ocultan salvo un instante tras fijar. levelBase: niveles extra de partida.
+// reverseLevel: a partir de ese nivel la rotación es antihoraria.
+const CHALLENGES = {
+  classic:   { name: 'Clásico' },
+  sprint:    { name: '40 líneas en 2:00', goalLines: 40, timeLimit: 120000 },
+  garbage:   { name: 'Basura cada 10 s', timeLimit: 90000, survive: true, garbageEvery: 10000 },
+  preset:    { name: 'Tablero pre-colocado', goalLines: 15, presetRows: 6 },
+  invisible: { name: 'Piezas invisibles', goalLines: 10, invisible: true },
+  reverse:   { name: 'Rotación inversa', goalLines: 20, levelBase: 5, reverseLevel: 7 },
+};
+const GARBAGE_TYPE = 8;     // las filas de basura reutilizan el color de la tuerca
+const PRESET_FILL = 0.7;    // probabilidad de celda ocupada en el tablero pre-colocado
+const REVEAL_MS = 600;      // cuánto se ven los bloques tras fijar una pieza en el modo invisible
+
 const canvas = document.getElementById('board');
 const ctx = canvas.getContext('2d');
 const nextCanvas = document.getElementById('next-canvas');
@@ -119,6 +136,9 @@ const themeBtn = document.getElementById('theme-toggle');
 const powerupEl = document.getElementById('powerup-status');
 const comboEl = document.getElementById('combo-status');
 const soundBtn = document.getElementById('sound-toggle');
+const modeSelect = document.getElementById('mode-select');
+const goalEl = document.getElementById('challenge-goal');
+const timerEl = document.getElementById('challenge-timer');
 
 // Colores del canvas leídos de las variables CSS del tema activo (cacheados al cambiar de tema)
 let theme = 'dark', palette = COLORS, gridColor, highlightColor, ghostAlpha, powerColor, wildColor, comboColor, fxColors = {};
@@ -135,10 +155,72 @@ let effect, particles, shakeLeft;
 // Hold: tipo de pieza reservada (null = vacío) y si ya se usó con la pieza actual
 let held, holdUsed;
 let combo, backToBack, lastMoveRotation, floaters;
+// Desafío: modo activo, tiempo transcurrido, acumulador de basura y tiempo restante de visibilidad (modo invisible)
+let mode = 'classic', challengeElapsed, garbageAccum, revealLeft;
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
 function createBoard() {
   return Array.from({ length: ROWS }, () => new Array(COLS).fill(0));
+}
+
+const challenge = () => CHALLENGES[mode];
+const levelFor = n => Math.floor(n / 10) + 1 + (challenge().levelBase || 0);
+const dropFor = lvl => Math.max(100, 1000 - (lvl - 1) * 90);
+const reverseActive = () => !!challenge().reverseLevel && level >= challenge().reverseLevel;
+
+// Bloques fijos iniciales: cada fila con huecos aleatorios (nunca completa)
+function fillPreset(rows) {
+  for (let r = ROWS - rows; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++)
+      if (Math.random() < PRESET_FILL) board[r][c] = Math.floor(Math.random() * (NUT_TYPE - 1)) + 1;
+    if (board[r].every(v => v)) board[r][Math.floor(Math.random() * COLS)] = 0;
+  }
+}
+
+// Sube el tablero una fila e inserta basura con un hueco; devuelve false si no cabe
+function addGarbage() {
+  if (board[0].some(v => v)) return false;
+  const hole = Math.floor(Math.random() * COLS);
+  board.shift();
+  board.push(Array.from({ length: COLS }, (_, c) => (c === hole ? 0 : GARBAGE_TYPE)));
+  while (collide(current.shape, current.x, current.y) && current.y > 0) current.y--;
+  return !collide(current.shape, current.x, current.y);
+}
+
+function formatTime(ms) {
+  const t = Math.ceil(Math.max(0, ms) / 1000);
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+}
+
+// Avanza los relojes del desafío (solo cuando la partida corre: no en pausa, animación ni congelación)
+function tickChallenge(dt) {
+  const cfg = challenge();
+  challengeElapsed += dt;
+  if (cfg.garbageEvery) {
+    garbageAccum += dt;
+    if (garbageAccum >= cfg.garbageEvery) {
+      garbageAccum -= cfg.garbageEvery;
+      if (!addGarbage()) { endGame(); return; }
+      sfx('rotate');
+    }
+  }
+  if (cfg.timeLimit && challengeElapsed >= cfg.timeLimit) {
+    if (cfg.survive) winGame('¡SOBREVIVISTE!'); else endGame('TIEMPO AGOTADO');
+    return;
+  }
+  updateChallengeHUD();
+}
+
+function updateChallengeHUD() {
+  const cfg = challenge();
+  let goal = '—', timer = '—';
+  if (cfg.goalLines) goal = `Líneas ${Math.min(lines, cfg.goalLines)}/${cfg.goalLines}`;
+  else if (cfg.survive) goal = 'Sobrevive';
+  if (reverseActive()) goal += ' · Rotación inversa';
+  if (cfg.timeLimit) timer = `⏱ ${formatTime(cfg.timeLimit - challengeElapsed)}`;
+  if (cfg.garbageEvery) timer += ` · Basura en ${Math.ceil((cfg.garbageEvery - garbageAccum) / 1000)}s`;
+  if (goalEl.textContent !== goal) goalEl.textContent = goal;
+  if (timerEl.textContent !== timer) timerEl.textContent = timer;
 }
 
 function randomPiece() {
@@ -207,8 +289,12 @@ function rotateCW(shape) {
   return result;
 }
 
+function rotateCCW(shape) {
+  return rotateCW(rotateCW(rotateCW(shape)));
+}
+
 function tryRotate() {
-  const rotated = rotateCW(current.shape);
+  const rotated = reverseActive() ? rotateCCW(current.shape) : rotateCW(current.shape);
   const kicks = [0, -1, 1, -2, 2];
   for (const kick of kicks) {
     if (!collide(rotated, current.x + kick, current.y)) {
@@ -353,11 +439,14 @@ function clearLines(tspin = false) {
   }
 
   lines += cleared;
-  level = Math.floor(lines / 10) + 1;
+  const prevLevel = level;
+  level = levelFor(lines);
+  const rev = challenge().reverseLevel;
+  if (rev && prevLevel < rev && level >= rev) msgs.push('ROTACIÓN INVERSA');
   const due = Math.floor(lines / POWERUP_EVERY);
   powerupsOwed += due - powerupsGranted;
   powerupsGranted = due;
-  dropInterval = Math.max(100, 1000 - (level - 1) * 90);
+  dropInterval = dropFor(level);
 
   const perfect = board.every(row => row.every(v => v === 0));
   if (perfect) {
@@ -369,6 +458,8 @@ function clearLines(tspin = false) {
   sfx(perfect ? 'perfect' : tspin ? 'tspin' : hard ? 'tetris' : 'clear', combo);
   if (perfect || hard || combo > 0) sparkle(perfect ? 60 : 24 + combo * 6);
   updateHUD();
+  const goal = challenge().goalLines;
+  if (goal && lines >= goal) winGame('¡RETO SUPERADO!');
 }
 
 // Texto flotante apilado sobre el tablero
@@ -522,6 +613,7 @@ function updateParticles(dt) {
   }
   floaters = floaters.filter(f => f.life > 0);
   shakeLeft = Math.max(0, shakeLeft - dt);
+  revealLeft = Math.max(0, revealLeft - dt);
 }
 
 function spawn() {
@@ -529,6 +621,7 @@ function spawn() {
   next = randomPiece();
   lastMoveRotation = false;
   holdUsed = false;
+  revealLeft = REVEAL_MS;
   if (collide(current.shape, current.x, current.y)) {
     endGame();
   }
@@ -562,6 +655,7 @@ function updateHUD() {
   scoreEl.textContent = score.toLocaleString();
   linesEl.textContent = lines;
   levelEl.textContent = level;
+  updateChallengeHUD();
   const parts = [];
   if (combo > 0) parts.push(`Combo x${combo + 1}`);
   if (backToBack) parts.push('B2B activo');
@@ -681,10 +775,11 @@ function draw() {
   }
   drawGrid();
 
-  // board
+  // board (en el modo invisible solo se ve un instante tras fijar una pieza)
+  const boardAlpha = challenge().invisible ? revealLeft / REVEAL_MS : 1;
   for (let r = 0; r < ROWS; r++)
     for (let c = 0; c < COLS; c++)
-      drawBlock(ctx, c, r, board[r][c], BLOCK);
+      drawBlock(ctx, c, r, board[r][c], BLOCK, boardAlpha);
 
   // vista previa del efecto (en el punto de aterrizaje) o animación al aplicarse
   if (effect) {
@@ -734,11 +829,24 @@ function drawHold() {
   holdCanvas.classList.toggle('locked', !!holdUsed);
 }
 
-function endGame() {
+function endGame(title = 'GAME OVER') {
+  if (gameOver) return;
   gameOver = true;
   cancelAnimationFrame(animId);
-  overlayTitle.textContent = 'GAME OVER';
+  overlay.classList.remove('win');
+  overlayTitle.textContent = title;
   overlayScore.textContent = `Puntuación: ${score.toLocaleString()}`;
+  overlay.classList.remove('hidden');
+}
+
+function winGame(title) {
+  if (gameOver) return;
+  gameOver = true;
+  cancelAnimationFrame(animId);
+  const secs = (challengeElapsed / 1000).toFixed(1);
+  overlay.classList.add('win');
+  overlayTitle.textContent = title;
+  overlayScore.textContent = `Puntuación: ${score.toLocaleString()} · ${secs}s`;
   overlay.classList.remove('hidden');
 }
 
@@ -750,6 +858,7 @@ function togglePause() {
     loop(lastTime);
   } else {
     cancelAnimationFrame(animId);
+    overlay.classList.remove('win');
     overlayTitle.textContent = 'PAUSA';
     overlayScore.textContent = '';
     overlay.classList.remove('hidden');
@@ -771,7 +880,9 @@ function loop(ts) {
     updatePowerupHUD();
   } else {
     dropAccum += dt;
+    tickChallenge(dt);
   }
+  if (gameOver) { draw(); return; }
   if (dropAccum >= dropInterval) {
     dropAccum = 0;
     if (!collide(current.shape, current.x, current.y + 1)) {
@@ -788,12 +899,16 @@ function loop(ts) {
 
 function init() {
   board = createBoard();
+  if (challenge().presetRows) fillPreset(challenge().presetRows);
   score = 0;
   lines = 0;
-  level = 1;
+  level = levelFor(0);
   paused = false;
   gameOver = false;
-  dropInterval = 1000;
+  dropInterval = dropFor(level);
+  challengeElapsed = 0;
+  garbageAccum = 0;
+  revealLeft = REVEAL_MS;
   dropAccum = 0;
   lastTime = performance.now();
   powerupsOwed = 0;
@@ -846,6 +961,26 @@ document.addEventListener('keydown', e => {
       break;
   }
   updateHUD();
+});
+
+for (const [key, cfg] of Object.entries(CHALLENGES)) {
+  const opt = document.createElement('option');
+  opt.value = key;
+  opt.textContent = cfg.name;
+  modeSelect.appendChild(opt);
+}
+try {
+  const saved = localStorage.getItem('mode');
+  if (saved in CHALLENGES) mode = saved;
+} catch (e) {}
+modeSelect.value = mode;
+
+modeSelect.addEventListener('change', () => {
+  mode = modeSelect.value;
+  try { localStorage.setItem('mode', mode); } catch (e) {}
+  modeSelect.blur(); // evita que las flechas/Space cambien el modo mientras se juega
+  ensureAudio();
+  init();
 });
 
 restartBtn.addEventListener('click', () => { ensureAudio(); init(); });

@@ -25,6 +25,7 @@
   --fx-dye: #ea80fc;
   --fx-gravity: #b0bec5;
   --fx-freeze: #4fc3f7;
+  --fx-combo: #ffd740;
 }
 
 [data-theme="light"] {
@@ -54,6 +55,7 @@
   --fx-dye: #aa00ff;
   --fx-gravity: #546e7a;
   --fx-freeze: #0277bd;
+  --fx-combo: #ff6d00;
 }
 
 *, *::before, *::after {
@@ -232,7 +234,8 @@ kbd {
 }
 
 /* ---- Toggle de tema ---- */
-#theme-toggle {
+#theme-toggle,
+#sound-toggle {
   position: fixed;
   top: 16px;
   right: 16px;
@@ -247,6 +250,12 @@ kbd {
   cursor: pointer;
 }
 
-#theme-toggle:hover {
+#sound-toggle {
+  right: auto;
+  left: 16px;
+}
+
+#theme-toggle:hover,
+#sound-toggle:hover {
   border-color: var(--accent);
 }

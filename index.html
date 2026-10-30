@@ -14,6 +14,7 @@
 </head>
 <body>
   <button id="theme-toggle" type="button" tabindex="-1" aria-pressed="false" aria-label="Cambiar a modo claro">☀ Claro</button>
+  <button id="sound-toggle" type="button" tabindex="-1" aria-pressed="false" aria-label="Silenciar sonido">🔊 Sonido</button>
   <div class="wrapper">
     <h1 class="game-title">TETRIS</h1>
 
@@ -43,6 +44,11 @@
         <div class="panel-section">
           <span class="label">POWER-UP</span>
           <span class="powerup-status" id="powerup-status"></span>
+        </div>
+
+        <div class="panel-section">
+          <span class="label">COMBO</span>
+          <span class="powerup-status" id="combo-status" aria-live="polite">—</span>
         </div>
 
         <div class="panel-section controls">

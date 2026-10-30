@@ -27,6 +27,7 @@ Three files, all at repo root:
   - **State**: a handful of module-level `let` variables (`board`, `current`, `next`, `score`, `lines`, `level`, `paused`, `gameOver`, `dropInterval`, etc.) rather than a state object or class.
   - **Board model**: `ROWS × COLS` matrix where each cell is `0` (empty) or a color index `1–8` identifying the piece type.
   - **Pieces**: the 7 standard tetrominoes plus the 3×3 "tuerca" (ring with an empty center, index 8) defined as square matrices in `PIECES`. `randomPiece()` spawns the tuerca with probability `NUT_CHANCE` (0.01 = 1 of every 100 pieces) and otherwise picks one of the 7 tetrominoes uniformly. Rotation is done via `rotateCW` (transpose + reverse), not by storing rotation states.
+  - **Extra pieces**: pentominós `+`, `U`, `Y` (indices 11–13, chance `PENTOMINO_CHANCE`, +`PENTOMINO_BONUS` score on lock) and a 1×1 gift piece (index 14) granted via `singlesOwed` when `clearLines()` clears 4 rows at once; it spawns before pending power-ups. Indices 9–10 are reserved for power-ups (`null` placeholders in `COLORS`/`PIECES`).
   - **Collision**: `collide(shape, ox, oy)` checks bounds and overlap against `board`.
   - **Wall kicks**: `tryRotate()` attempts the rotated shape at offsets `[0, -1, 1, -2, 2]` columns, keeping the first that doesn't collide.
   - **Game loop**: `loop(ts)`, driven by `requestAnimationFrame`, accumulates elapsed time (`dropAccum`) and drops the piece one row once `dropInterval` is exceeded, otherwise calls `lockPiece()`.
